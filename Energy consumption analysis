@@ -1,0 +1,153 @@
+WITH base AS (
+    SELECT
+        s.entity,
+        s.tfromle1,
+        s.from,
+        s.to,
+        NULLIF(s.wert1, '')::numeric AS wert
+    FROM scheme.tfromle1 s
+    WHERE s.entity = '0000447554'
+      AND s.tfromle1 IN ('MSPOTNT', 'MSPOTVT', 'MSPOT24')
+),
+
+-- last year known period
+Last_year AS (
+    SELECT
+        x.entity,
+        x.tfromle1,
+        x.from,
+        x.to,
+        x.wert
+    FROM (
+        SELECT
+            z.entity,
+            z.tfromle1,
+            z.from,
+            z.to,
+            z.wert,
+
+            ROW_NUMBER() OVER (
+                PARTITION BY z.entity, z.tfromle1
+                ORDER BY z.to DESC
+            ) AS rn
+
+        FROM base z
+        WHERE z.to >= z.from + INTERVAL '11 months'
+          AND z.to <= CURRENT_DATE
+    ) x
+    WHERE x.rn = 1
+),
+
+-- from last known period till now 
+last_known AS (
+    SELECT
+        r.entity,
+        r.tfromle1,
+
+        r.to + INTERVAL '1 day' AS from,
+        CURRENT_DATE AS to,
+
+        ROUND(
+    (
+        (
+            r.wert / 12.0
+        ) *
+        (
+            12 * date_part('year', age(CURRENT_DATE, r.to))
+            + date_part('month', age(CURRENT_DATE, r.to))
+        )
+    )::numeric,
+    2
+) AS wert
+,
+        (
+            12 * date_part('year', age(CURRENT_DATE, r.to))
+            + date_part('month', age(CURRENT_DATE, r.to))
+        )::int AS pocet_mesiacov
+
+    FROM Last_year r
+    WHERE r.to < CURRENT_DATE
+),
+
+Results AS (
+
+    -- last year consumption
+    SELECT
+        'Year' AS typ,
+        r.entity,
+        r.tfromle1,
+        r.wert,
+        r.from AS obdobie_od,
+        r.to AS obdobie_do,
+        12 AS sum_month
+    FROM rocna r
+
+    UNION ALL
+
+    -- last_known
+    SELECT
+        'last_known' AS typ,
+        d.entity,
+        d.tfromle1,
+        d.wert,
+        d.from AS obdobie_od,
+        d.to AS obdobie_do,
+        d.pocet_mesiacov
+    FROM last_known d
+)
+
+SELECT
+    v.entity,
+    v.typ,
+
+    MIN(v.obdobie_od)::date AS obdobie_od,
+    MAX(v.obdobie_do)::date AS obdobie_do,
+    
+     -- Consumption_together (
+    SUM(
+    	CASE
+       		WHEN v.tfromle1 IN ('MSPOTNT', 'MSPOTVT', 'MSPOT24')
+        	THEN v.wert
+        	ELSE 0
+   		END
+	) AS Together,
+
+    -- NT
+    SUM(
+        CASE
+            WHEN v.tfromle1 = 'MSPOTNT'
+            THEN v.wert
+            ELSE 0
+        END
+    ) AS consumption_nt,
+
+    -- VT
+    SUM(
+        CASE
+            WHEN v.tfromle1 = 'MSPOTVT'
+            THEN v.wert
+            ELSE 0
+        END
+    ) AS consumption_vt,
+
+    -- ST/VT
+    SUM(
+        CASE
+            WHEN v.tfromle1 IN ('MSPOT24', 'MSPOTVT')
+            THEN v.wert
+            ELSE 0
+        END
+    ) AS consumption_st_vt,
+    
+
+    MAX(v.sum_month) AS sum_of_months
+
+FROM Results v
+
+GROUP BY
+    v.entity,
+    v.typ
+
+ORDER BY
+    v.typ
+;
